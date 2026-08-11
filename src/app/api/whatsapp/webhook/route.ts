@@ -14,6 +14,7 @@ import {
   handleTemplateWebhookChange,
   isTemplateWebhookField,
 } from '@/lib/whatsapp/template-webhook'
+import { applyOptOutKeyword } from '@/lib/whatsapp/opt-out'
 
 // The `after()` callback in POST runs within this route's max duration.
 // Inbound processing can fan out to per-media Meta verification calls, so
@@ -723,6 +724,14 @@ async function processMessage(
       message.id
     )
     return
+  }
+
+  // STOP/START keyword handling (WhatsApp Business Policy compliance) —
+  // only plain text carries an opt-out/opt-in phrase; other content types
+  // (media, interactive taps, reactions) never match. Best-effort: never
+  // throws, so a DB hiccup here can't drop the inbound message.
+  if (message.type === 'text') {
+    await applyOptOutKeyword(supabaseAdmin(), contactRecord.id, contentText)
   }
 
   // Update conversation. The unread bump is done DB-side (migration 037's

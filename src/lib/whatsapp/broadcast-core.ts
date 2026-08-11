@@ -29,6 +29,7 @@ import {
 import { isMessageTemplate } from '@/lib/whatsapp/template-row-guard';
 import type { MessageTemplate } from '@/types';
 import { findOrCreateContact } from '@/lib/api/v1/contacts';
+import { OPTED_OUT_ERROR } from '@/lib/whatsapp/opt-out';
 
 /** Thrown by createBroadcast on a caller-visible failure; route maps it. */
 export class BroadcastError extends Error {
@@ -58,6 +59,7 @@ export interface CreateBroadcastParams {
 
 interface PlannedRecipient {
   recipientRowId: string;
+  contactId: string;
   phone: string;
   params: string[];
 }
@@ -143,6 +145,17 @@ export async function createBroadcast(
   }
   const templateRow = (rawTemplateRow as MessageTemplate | null) ?? null;
 
+  // Enforce approval status server-side — see send-message.ts's
+  // identical check for the rationale. Broadcasts are template-only,
+  // so this is the single gate for the entire fan-out.
+  if (templateRow?.status && templateRow.status !== 'APPROVED') {
+    throw new BroadcastError(
+      'template_not_approved',
+      `Template "${templateName}" is not approved for sending (status: ${templateRow.status}).`,
+      400
+    );
+  }
+
   // Resolve each recipient to a contact. Invalid phones are dropped
   // (counted as rejected) rather than aborting the whole broadcast.
   const resolved: { contactId: string; phone: string; params: string[] }[] = [];
@@ -225,7 +238,12 @@ export async function createBroadcast(
   const planned: PlannedRecipient[] = createdRows.map(
     (row: { recipient_id: string; contact_id: string }) => {
       const r = byContact.get(row.contact_id)!;
-      return { recipientRowId: row.recipient_id, phone: r.phone, params: r.params };
+      return {
+        recipientRowId: row.recipient_id,
+        contactId: row.contact_id,
+        phone: r.phone,
+        params: r.params,
+      };
     }
   );
 
@@ -260,7 +278,24 @@ export async function deliverBroadcast(
 ): Promise<void> {
   let sentCount = 0;
 
+  // Batch-resolve opted-out contacts once up front rather than a
+  // per-recipient query in the loop below.
+  const { data: optedOutRows } = await db
+    .from('contacts')
+    .select('id')
+    .in('id', plan.planned.map((r) => r.contactId))
+    .eq('opted_out', true);
+  const optedOutIds = new Set((optedOutRows ?? []).map((r: { id: string }) => r.id));
+
   for (const recipient of plan.planned) {
+    if (optedOutIds.has(recipient.contactId)) {
+      await db
+        .from('broadcast_recipients')
+        .update({ status: 'failed', error_message: OPTED_OUT_ERROR })
+        .eq('id', recipient.recipientRowId);
+      continue;
+    }
+
     const variants = phoneVariants(recipient.phone);
     let sentMessageId: string | null = null;
     let lastError: string | null = null;

@@ -12,6 +12,7 @@ import {
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils'
 import { supabaseAdmin } from './admin-client'
+import { OPTED_OUT_ERROR } from '@/lib/whatsapp/opt-out'
 
 // ------------------------------------------------------------
 // Automation-side Meta sender.
@@ -118,12 +119,15 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
   // new tenancy column.
   const { data: contact, error: contactErr } = await db
     .from('contacts')
-    .select('id, phone')
+    .select('id, phone, opted_out')
     .eq('id', input.contactId)
     .eq('account_id', input.accountId)
     .maybeSingle()
   if (contactErr || !contact?.phone) {
     throw new Error('contact not found for this account')
+  }
+  if (contact.opted_out) {
+    throw new Error(OPTED_OUT_ERROR)
   }
 
   const sanitized = sanitizePhoneForMeta(contact.phone)

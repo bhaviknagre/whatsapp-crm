@@ -15,6 +15,8 @@ import {
   rateLimitResponse,
   RATE_LIMITS,
 } from '@/lib/rate-limit'
+import { findExistingContact } from '@/lib/contacts/dedupe'
+import { OPTED_OUT_ERROR } from '@/lib/whatsapp/opt-out'
 
 interface BroadcastResult {
   phone: string
@@ -161,6 +163,17 @@ export async function POST(request: Request) {
     }
     const templateRow = rawTemplateRow ?? null
 
+    // Enforce approval status server-side — see send-message.ts's
+    // identical check for the rationale.
+    if (templateRow?.status && templateRow.status !== 'APPROVED') {
+      return NextResponse.json(
+        {
+          error: `Template "${template_name}" is not approved for sending (status: ${templateRow.status}).`,
+        },
+        { status: 400 },
+      )
+    }
+
     const results: BroadcastResult[] = []
     let sentCount = 0
     let failedCount = 0
@@ -173,6 +186,17 @@ export async function POST(request: Request) {
           phone: recipient.phone,
           status: 'failed',
           error: 'Invalid phone number format',
+        })
+        failedCount++
+        continue
+      }
+
+      const existingContact = await findExistingContact(supabase, accountId, sanitized)
+      if (existingContact?.opted_out) {
+        results.push({
+          phone: recipient.phone,
+          status: 'failed',
+          error: OPTED_OUT_ERROR,
         })
         failedCount++
         continue

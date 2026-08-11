@@ -38,6 +38,66 @@ async function throwMetaError(response: Response, fallback: string): Promise<nev
   throw new Error(message)
 }
 
+// Transient failures worth a retry: rate-limited (429) and server-side
+// errors (5xx). Anything else (400/401/403/404 — a malformed payload, a
+// dead token, an unknown recipient) is deterministic and retrying it just
+// burns the send budget for the same eventual failure.
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
+const MAX_SEND_ATTEMPTS = 3
+const BASE_BACKOFF_MS = 500
+
+/**
+ * POST to the Meta Graph API with retry-with-backoff on transient
+ * failures (429 / 5xx / network errors) — up to `MAX_SEND_ATTEMPTS`
+ * total attempts. Honors `Retry-After` when Meta sends one. Returns the
+ * final `Response` (which may still be non-ok) so callers keep their
+ * existing `!response.ok` → `throwMetaError` handling unchanged.
+ */
+async function postToMeta(
+  url: string,
+  accessToken: string,
+  body: unknown
+): Promise<Response> {
+  for (let attempt = 1; attempt <= MAX_SEND_ATTEMPTS; attempt++) {
+    let response: Response
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(body),
+      })
+    } catch (err) {
+      if (attempt === MAX_SEND_ATTEMPTS) throw err
+      const delay = BASE_BACKOFF_MS * 2 ** (attempt - 1)
+      console.warn(
+        `[meta-api] network error calling Meta (attempt ${attempt}/${MAX_SEND_ATTEMPTS}), retrying in ${delay}ms:`,
+        err instanceof Error ? err.message : err
+      )
+      await new Promise((resolve) => setTimeout(resolve, delay))
+      continue
+    }
+
+    if (response.ok || !RETRYABLE_STATUS.has(response.status) || attempt === MAX_SEND_ATTEMPTS) {
+      return response
+    }
+
+    const retryAfterHeader = response.headers.get('retry-after')
+    const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : NaN
+    const delay = Number.isFinite(retryAfterMs)
+      ? retryAfterMs
+      : BASE_BACKOFF_MS * 2 ** (attempt - 1)
+    console.warn(
+      `[meta-api] transient ${response.status} from Meta (attempt ${attempt}/${MAX_SEND_ATTEMPTS}), retrying in ${delay}ms`
+    )
+    await new Promise((resolve) => setTimeout(resolve, delay))
+  }
+  // Unreachable — the loop always returns or throws by the final attempt.
+  throw new Error('Meta API request failed after retries')
+}
+
 // ============================================================
 // Phone number / account
 // ============================================================
@@ -244,14 +304,7 @@ export async function sendTextMessage(
   if (contextMessageId) {
     body.context = { message_id: contextMessageId }
   }
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify(body),
-  })
+  const response = await postToMeta(url, accessToken, body)
   if (!response.ok) {
     await throwMetaError(response, `Meta API error: ${response.status}`)
   }
@@ -310,14 +363,7 @@ export async function sendMediaMessage(
   }
   if (contextMessageId) body.context = { message_id: contextMessageId }
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify(body),
-  })
+  const response = await postToMeta(url, accessToken, body)
   if (!response.ok) {
     await throwMetaError(response, `Meta API error: ${response.status}`)
   }
@@ -428,14 +474,7 @@ export async function sendTemplateMessage(
     body.context = { message_id: contextMessageId }
   }
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify(body),
-  })
+  const response = await postToMeta(url, accessToken, body)
   if (!response.ok) {
     await throwMetaError(response, `Meta API error: ${response.status}`)
   }
@@ -682,19 +721,12 @@ export async function sendReactionMessage(
 ): Promise<MetaSendResult> {
   const { phoneNumberId, accessToken, to, targetMessageId, emoji } = args
   const url = `${META_API_BASE}/${phoneNumberId}/messages`
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to,
-      type: 'reaction',
-      reaction: { message_id: targetMessageId, emoji },
-    }),
+  const response = await postToMeta(url, accessToken, {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'reaction',
+    reaction: { message_id: targetMessageId, emoji },
   })
   if (!response.ok) {
     await throwMetaError(response, `Meta API error: ${response.status}`)
@@ -818,14 +850,7 @@ export async function sendInteractiveButtons(
   if (contextMessageId) body.context = { message_id: contextMessageId }
 
   const url = `${META_API_BASE}/${phoneNumberId}/messages`
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify(body),
-  })
+  const response = await postToMeta(url, accessToken, body)
   if (!response.ok) {
     await throwMetaError(response, `Meta API error: ${response.status}`)
   }
@@ -950,14 +975,7 @@ export async function sendInteractiveList(
   if (contextMessageId) body.context = { message_id: contextMessageId }
 
   const url = `${META_API_BASE}/${phoneNumberId}/messages`
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify(body),
-  })
+  const response = await postToMeta(url, accessToken, body)
   if (!response.ok) {
     await throwMetaError(response, `Meta API error: ${response.status}`)
   }

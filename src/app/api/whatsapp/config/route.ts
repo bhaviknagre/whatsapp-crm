@@ -185,11 +185,11 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json()
-    const { phone_number_id, waba_id, access_token, verify_token, pin } = body
+    const { phone_number_id, waba_id, access_token: providedAccessToken, verify_token, pin } = body
 
-    if (!access_token || !phone_number_id) {
+    if (!phone_number_id) {
       return NextResponse.json(
-        { error: 'access_token and phone_number_id are required' },
+        { error: 'phone_number_id is required' },
         { status: 400 }
       )
     }
@@ -201,6 +201,44 @@ export async function POST(request: Request) {
           { status: 400 }
         )
       }
+    }
+
+    // Look up any pre-existing row for this account up front — needed
+    // both to decide whether `access_token` may be omitted (reuse the
+    // stored one) and, further down, whether this save is a genuine
+    // credential rotation vs. an unrelated field edit.
+    const { data: existing } = await supabase
+      .from('whatsapp_config')
+      .select('id, registered_at, phone_number_id, access_token, verify_token')
+      .eq('account_id', accountId)
+      .maybeSingle()
+
+    // The UI never re-populates the masked token field with a real
+    // value, so "unedited" saves omit `access_token` entirely — every
+    // settings change used to force a full re-paste of the Meta token
+    // as a result. Reuse the already-stored (decrypted) token in that
+    // case; a caller rotating credentials still passes a fresh one.
+    let access_token: string
+    if (typeof providedAccessToken === 'string' && providedAccessToken.trim()) {
+      access_token = providedAccessToken.trim()
+    } else if (existing?.access_token) {
+      try {
+        access_token = decrypt(existing.access_token)
+      } catch (err) {
+        console.error('[whatsapp/config POST] stored token decryption failed:', err)
+        return NextResponse.json(
+          {
+            error:
+              'The stored access token can\'t be decrypted with the current ENCRYPTION_KEY. Re-enter your access token to continue, or use "Reset Configuration" below.',
+          },
+          { status: 400 },
+        )
+      }
+    } else {
+      return NextResponse.json(
+        { error: 'access_token is required for initial setup' },
+        { status: 400 }
+      )
     }
 
     // Reject if another account has already claimed this phone_number_id.
@@ -256,7 +294,15 @@ export async function POST(request: Request) {
     let encryptedVerifyToken: string | null
     try {
       encryptedAccessToken = encrypt(access_token)
-      encryptedVerifyToken = verify_token ? encrypt(verify_token) : null
+      // The form field is blank on every load (it's never re-populated
+      // with the real value), so a save the user didn't intend to touch
+      // this field on used to send `verify_token: null` and silently
+      // erase the previously-saved one. Only overwrite when a new
+      // non-empty value was actually submitted; otherwise keep whatever
+      // is already stored.
+      encryptedVerifyToken = verify_token
+        ? encrypt(verify_token)
+        : (existing?.verify_token ?? null)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown encryption error'
       console.error('Encryption failed:', message)
@@ -269,15 +315,9 @@ export async function POST(request: Request) {
       )
     }
 
-    // Look up any pre-existing row for this account so we know whether
-    // this number is already registered with Meta — if so we can skip
-    // /register when the user didn't provide a PIN this time around.
-    const { data: existing } = await supabase
-      .from('whatsapp_config')
-      .select('id, registered_at, phone_number_id')
-      .eq('account_id', accountId)
-      .maybeSingle()
-
+    // `existing` (fetched above) tells us whether this number is
+    // already registered with Meta — if so we can skip /register when
+    // the user didn't provide a PIN this time around.
     const sameNumber =
       existing?.phone_number_id === phone_number_id &&
       existing?.registered_at != null

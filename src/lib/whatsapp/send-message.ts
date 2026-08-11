@@ -262,7 +262,17 @@ export async function sendMessageToConversation(
     );
   }
 
-  const accessToken = decrypt(config.access_token);
+  let accessToken: string;
+  try {
+    accessToken = decrypt(config.access_token);
+  } catch (err) {
+    console.error('[send-message] stored token decryption failed:', err);
+    throw new SendMessageError(
+      'token_corrupted',
+      'The stored WhatsApp access token can\'t be decrypted with the current ENCRYPTION_KEY — this usually means the key differs between environments (e.g. local vs. production). Go to Settings → WhatsApp Configuration, click "Reset Configuration", and reconnect.',
+      400
+    );
+  }
 
   // Self-heal legacy CBC ciphertexts. Fire-and-forget; idempotent.
   if (isLegacyFormat(config.access_token)) {
@@ -327,6 +337,49 @@ export async function sendMessageToConversation(
       );
     }
     templateRow = data ?? null;
+
+    // Enforce approval status server-side. The template pickers already
+    // filter to `status = 'APPROVED'` client-side, but that's a UI
+    // convenience, not a gate — a caller hitting this function directly
+    // (public v1 API, or a stale picker) could otherwise fire a
+    // PENDING/REJECTED/PAUSED/DISABLED template straight at Meta. Only
+    // enforced when we have a locally-synced row to check; an unsynced
+    // template name is passed through and left to Meta's own validation.
+    if (templateRow?.status && templateRow.status !== 'APPROVED') {
+      throw new SendMessageError(
+        'template_not_approved',
+        `Template "${templateName}" is not approved for sending (status: ${templateRow.status}).`,
+        400
+      );
+    }
+  }
+
+  // Enforce the 24-hour customer-service session window server-side for
+  // free-form (non-template) sends — Meta rejects these outside the
+  // window anyway, but failing fast here avoids a round trip and keeps
+  // the rule enforced even for callers that bypass the composer's UI
+  // countdown (e.g. the public v1 API).
+  if (messageType !== 'template') {
+    const { data: lastCustomerMessage } = await db
+      .from('messages')
+      .select('created_at')
+      .eq('conversation_id', conversationId)
+      .eq('sender_type', 'customer')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const hoursSinceLastCustomerMessage = lastCustomerMessage?.created_at
+      ? (Date.now() - new Date(lastCustomerMessage.created_at).getTime()) / 3_600_000
+      : Infinity;
+
+    if (hoursSinceLastCustomerMessage >= 24) {
+      throw new SendMessageError(
+        'session_expired',
+        'The 24-hour customer service window has expired for this conversation. Send an approved template message to re-open it.',
+        400
+      );
+    }
   }
 
   const attempt = async (phone: string): Promise<string> => {
