@@ -1,0 +1,48 @@
+{
+  "name": "whatsapp-crm-mcp",
+  "version": "0.1.1",
+  "mcpName": "io.github.bhaviknagre/whatsapp-crm-mcp",
+  "description": "Model Context Protocol (MCP) server for WhatsApp CRM — drive your self-hosted WhatsApp CRM from Claude, Cursor, and other MCP clients.",
+  "license": "MIT",
+  "homepage": "https://github.com/bhaviknagre/whatsapp-crm",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bhaviknagre/whatsapp-crm.git",
+    "directory": "mcp-server"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "whatsapp-crm",
+    "whatsapp",
+    "crm",
+    "claude",
+    "ai"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "whatsapp-crm-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "typescript": "^5.7.0"
+  }
+}
