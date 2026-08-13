@@ -20,12 +20,14 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { format } from "date-fns";
 import { useTranslations } from "next-intl";
+import { BookingPanel, type BookingRow } from "./booking-panel";
 
 interface ContactSidebarProps {
   contact: Contact | null;
+  conversationId?: string | null;
 }
 
-export function ContactSidebar({ contact }: ContactSidebarProps) {
+export function ContactSidebar({ contact, conversationId = null }: ContactSidebarProps) {
   const tSidebar = useTranslations("Inbox.sidebar");
   const tThread = useTranslations("Inbox.messageThread");
 
@@ -34,6 +36,7 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
   const [deals, setDeals] = useState<Deal[]>([]);
   const [notes, setNotes] = useState<ContactNote[]>([]);
   const [tags, setTags] = useState<(Tag & { contact_tag_id: string })[]>([]);
+  const [bookings, setBookings] = useState<BookingRow[]>([]);
   const [newNote, setNewNote] = useState("");
   const [addingNote, setAddingNote] = useState(false);
 
@@ -42,8 +45,8 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
 
     const supabase = createClient();
 
-    // Fetch deals, notes, and tags in parallel
-    const [dealsRes, notesRes, tagsRes] = await Promise.all([
+    // Fetch deals, notes, tags, and bookings in parallel
+    const [dealsRes, notesRes, tagsRes, bookingsRes] = await Promise.all([
       supabase
         .from("deals")
         .select("*, stage:pipeline_stages(*)")
@@ -58,6 +61,12 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
         .from("contact_tags")
         .select("id, tag_id, tags(*)")
         .eq("contact_id", contact.id),
+      supabase
+        .from("bookings")
+        .select("*")
+        .eq("contact_id", contact.id)
+        .order("meeting_start_at", { ascending: false })
+        .limit(5),
     ]);
 
     if (dealsRes.data) setDeals(dealsRes.data);
@@ -71,6 +80,7 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
         }));
       setTags(mapped);
     }
+    if (bookingsRes.data) setBookings(bookingsRes.data as BookingRow[]);
   }, [contact]);
 
   // Load on contact change. setContactData/setTags run inside async
@@ -206,6 +216,20 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
               )}
             </div>
           </div>
+
+          {/* Divider */}
+          <div className="my-4 border-t border-border" />
+
+          {/* Bookings */}
+          <BookingPanel
+            bookings={bookings}
+            contactId={contact.id}
+            conversationId={conversationId}
+            onPatched={(id, patch) =>
+              setBookings((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)))
+            }
+            onCreated={(booking) => setBookings((prev) => [booking, ...prev])}
+          />
 
           {/* Divider */}
           <div className="my-4 border-t border-border" />

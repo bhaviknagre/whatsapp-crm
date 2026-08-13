@@ -18,12 +18,15 @@ import {
   loadPipelineDonut,
   loadResponseTime,
 } from '@/lib/dashboard/queries'
+import { loadBookingMetrics, loadUpcomingBookings } from '@/lib/dashboard/booking-queries'
 import type {
   ActivityItem,
+  BookingMetricsBundle,
   ConversationsSeriesPoint,
   MetricsBundle,
   PipelineDonutData,
   ResponseTimeSummary,
+  UpcomingBooking,
 } from '@/lib/dashboard/types'
 
 import { MetricCard } from '@/components/dashboard/metric-card'
@@ -32,11 +35,26 @@ import { QuickActions } from '@/components/dashboard/quick-actions'
 import { ConversationsChart } from '@/components/dashboard/conversations-chart'
 import { PipelineDonut } from '@/components/dashboard/pipeline-donut'
 import { ResponseTimeChart } from '@/components/dashboard/response-time-chart'
+import { BookingMetricsSection } from '@/components/dashboard/booking-metrics-section'
+import { UpcomingMeetings } from '@/components/dashboard/upcoming-meetings'
 import { ActivityFeed } from '@/components/dashboard/activity-feed'
 
 import { useTranslations } from 'next-intl'
 
 type RangeDays = 7 | 30 | 90
+
+// Every table a dashboard widget reads from — see the realtime effect
+// below. Each must be added to the `supabase_realtime` publication
+// (migrations 001, 042, 043) for its changes to actually arrive here.
+const REALTIME_TABLES = [
+  'bookings',
+  'messages',
+  'conversations',
+  'contacts',
+  'deals',
+  'broadcasts',
+  'automation_logs',
+] as const
 
 export default function DashboardPage() {
   const t = useTranslations('Dashboard.page')
@@ -63,6 +81,12 @@ export default function DashboardPage() {
 
   const [activity, setActivity] = useState<ActivityItem[] | null>(null)
   const [activityLoading, setActivityLoading] = useState(true)
+
+  const [bookingMetrics, setBookingMetrics] = useState<BookingMetricsBundle | null>(null)
+  const [bookingMetricsLoading, setBookingMetricsLoading] = useState(true)
+
+  const [upcomingMeetings, setUpcomingMeetings] = useState<UpcomingBooking[] | null>(null)
+  const [upcomingMeetingsLoading, setUpcomingMeetingsLoading] = useState(true)
 
   const loadAll = useCallback(() => {
     const db = createClient()
@@ -97,7 +121,62 @@ export default function DashboardPage() {
       .then((a) => setActivity(a))
       .catch((err) => console.error('[dashboard] activity failed:', err))
       .finally(() => setActivityLoading(false))
+
+    void loadBookingMetrics(db)
+      .then((b) => setBookingMetrics(b))
+      .catch((err) => console.error('[dashboard] booking metrics failed:', err))
+      .finally(() => setBookingMetricsLoading(false))
+
+    void loadUpcomingBookings(db)
+      .then((b) => setUpcomingMeetings(b))
+      .catch((err) => console.error('[dashboard] upcoming meetings failed:', err))
+      .finally(() => setUpcomingMeetingsLoading(false))
   }, [])
+
+  // Live updates: every table that feeds a widget above changes from
+  // background processes with no user action in this tab — the
+  // booking cron sending confirmations, a lead acknowledging, a
+  // teammate closing a deal on their own screen, an automation firing.
+  // A plain "fetch once on mount" leaves the whole page stale for as
+  // long as it stays open. One shared channel across every source
+  // table, all coalesced into a single debounced `loadAll()` — same
+  // postgres_changes pattern the inbox already uses (see
+  // src/hooks/use-realtime.ts), just fanned out to more tables here
+  // since the dashboard aggregates across the whole account instead of
+  // one conversation.
+  //
+  useEffect(() => {
+    const db = createClient()
+    // Coalesce bursts (one action often touches several tables at
+    // once — e.g. a booking confirmation updates `bookings` and
+    // inserts into `messages`) into a single refetch.
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null
+    const scheduleRefetch = () => {
+      if (debounceTimer) clearTimeout(debounceTimer)
+      debounceTimer = setTimeout(loadAll, 400)
+    }
+
+    let channel = db.channel('dashboard-live')
+    for (const table of REALTIME_TABLES) {
+      channel = channel.on('postgres_changes', { event: '*', schema: 'public', table }, scheduleRefetch)
+    }
+    channel.subscribe()
+
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer)
+      db.removeChannel(channel)
+    }
+  }, [loadAll])
+
+  // Fallback for anything realtime doesn't cover (e.g. a table not
+  // yet added to the publication): refresh when the tab regains focus.
+  useEffect(() => {
+    function onVisible() {
+      if (document.visibilityState === 'visible') loadAll()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [loadAll])
 
   useEffect(() => {
     loadAll()
@@ -218,6 +297,16 @@ export default function DashboardPage() {
 
       {/* Response time */}
       <ResponseTimeChart data={responseTime} loading={responseTimeLoading} />
+
+      {/* Booking metrics + upcoming meetings agenda */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
+        <div className="lg:col-span-3">
+          <BookingMetricsSection data={bookingMetrics} loading={bookingMetricsLoading} />
+        </div>
+        <div className="lg:col-span-2">
+          <UpcomingMeetings bookings={upcomingMeetings} loading={upcomingMeetingsLoading} />
+        </div>
+      </div>
 
       {/* Activity feed */}
       <ActivityFeed items={activity} loading={activityLoading} />

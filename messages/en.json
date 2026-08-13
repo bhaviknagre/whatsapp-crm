@@ -284,6 +284,7 @@
       "tags": "Tags",
       "notes": "Notes",
       "deals": "Deals",
+      "meetings": "Meetings",
       "noTags": "No tags",
       "noDeals": "No deals",
       "addNotePlaceholder": "Add a note..."
@@ -1533,6 +1534,7 @@
       "quick-replies": "Quick replies",
       "fields": "Fields & tags",
       "deals": "Deals & currency",
+      "bookings": "Booking & calendar",
       "members": "Team members",
       "api": "API keys"
     },

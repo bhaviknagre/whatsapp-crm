@@ -64,3 +64,11 @@ docker run -d --env-file .env.local -e PORT=3000 -p 3000:3000 wacrm
   deployment, sending the shared secret in the `x-cron-secret` header
   (`AUTOMATION_CRON_SECRET`, see `.env.local.example`). Both return
   503 until that variable is set.
+- If you use the booking lifecycle feature (Cal.com webhook →
+  WhatsApp confirmations/reminders/no-show follow-ups), also point the
+  scheduler at `GET /api/bookings/cron`, sending its own shared secret
+  in `x-cron-secret` (`BOOKING_CRON_SECRET` — deliberately separate
+  from `AUTOMATION_CRON_SECRET` so it can be rotated independently).
+  Run it at least every 1–2 minutes — reminders are timestamped to the
+  minute, so a coarser interval delays them. Also returns 503 until
+  the variable is set.

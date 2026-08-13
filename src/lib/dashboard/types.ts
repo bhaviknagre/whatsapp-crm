@@ -15,6 +15,26 @@ export interface MetricsBundle {
   messagesSentToday: MetricDelta
 }
 
+export interface BookingMetricsBundle {
+  totalBookings: number
+  /** % (0-100) of bookings whose lead tapped "Got It" at least once. */
+  confirmationRate: number | null
+  /** % (0-100) of resolved (attended|no_show) bookings that ended up no_show. */
+  noShowRate: number | null
+  /** Count of no-show bookings that later got a fresh booking (reschedule). */
+  recoveredMeetings: number
+}
+
+export interface UpcomingBooking {
+  id: string
+  title: string | null
+  meeting_start_at: string
+  meeting_end_at: string
+  lead_name: string | null
+  lead_timezone: string
+  assignee_name: string | null
+}
+
 export interface ConversationsSeriesPoint {
   day: string // YYYY-MM-DD local
   incoming: number

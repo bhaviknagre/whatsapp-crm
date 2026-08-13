@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Loader2, Upload, Trash2, Mail, CircleAlert } from 'lucide-react';
 
 import { createClient } from '@/lib/supabase/client';
+import { sanitizePhoneForMeta, isValidE164 } from '@/lib/whatsapp/phone-utils';
 import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -45,12 +46,51 @@ export function ProfileForm() {
   const [saving, setSaving] = useState(false);
   const [emailChangePending, setEmailChangePending] = useState(false);
 
+  // Booking notification prefs — not part of the shared `useAuth`
+  // profile shape (that context is read on every page load; these two
+  // columns are only ever needed here), so fetched separately.
+  const [timezone, setTimezone] = useState('UTC');
+  const [notificationPhone, setNotificationPhone] = useState('');
+  const [bookingPrefsLoaded, setBookingPrefsLoaded] = useState(false);
+  const originalBookingPrefsRef = useRef({ timezone: 'UTC', notificationPhone: '' });
+  const timezoneOptions = useMemo(() => {
+    try {
+      return Intl.supportedValuesOf('timeZone');
+    } catch {
+      return ['UTC'];
+    }
+  }, []);
+
   // Seed form state once the profile loads.
   useEffect(() => {
     if (!profile) return;
     setFullName(profile.full_name ?? '');
     setEmail(profile.email ?? '');
   }, [profile]);
+
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    void supabase
+      .from('profiles')
+      .select('timezone, notification_phone')
+      .eq('user_id', user.id)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (cancelled || !data) return;
+        const tz = (data.timezone as string | null) || 'UTC';
+        const phone = (data.notification_phone as string | null) || '';
+        setTimezone(tz);
+        setNotificationPhone(phone);
+        originalBookingPrefsRef.current = { timezone: tz, notificationPhone: phone };
+        setBookingPrefsLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // `supabase` is a fresh client per render from createClient(); user.id is the real dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
   // Cleanup object URLs to avoid leaks.
   useEffect(() => {
@@ -112,6 +152,15 @@ export function ProfileForm() {
       return;
     }
 
+    const trimmedNotificationPhone = notificationPhone.trim();
+    const sanitizedNotificationPhone = trimmedNotificationPhone
+      ? sanitizePhoneForMeta(trimmedNotificationPhone)
+      : '';
+    if (sanitizedNotificationPhone && !isValidE164(sanitizedNotificationPhone)) {
+      toast.error('Notification phone must be a valid number, e.g. +15551234567.');
+      return;
+    }
+
     setSaving(true);
     try {
       let nextAvatarUrl: string | null = profile.avatar_url ?? null;
@@ -139,12 +188,14 @@ export function ProfileForm() {
         nextAvatarUrl = null;
       }
 
-      // Persist name + avatar to profiles.
+      // Persist name + avatar + booking notification prefs to profiles.
       const { error: updateError } = await supabase
         .from('profiles')
         .update({
           full_name: trimmedName,
           avatar_url: nextAvatarUrl,
+          timezone,
+          notification_phone: sanitizedNotificationPhone || null,
         })
         .eq('user_id', user.id);
       if (updateError) {
@@ -176,6 +227,11 @@ export function ProfileForm() {
       setPendingAvatar(null);
       setPreviewUrl(null);
       setRemoveAvatar(false);
+      setNotificationPhone(sanitizedNotificationPhone);
+      originalBookingPrefsRef.current = {
+        timezone,
+        notificationPhone: sanitizedNotificationPhone,
+      };
       await refreshProfile();
 
       toast.success(
@@ -196,7 +252,9 @@ export function ProfileForm() {
     (fullName.trim() !== (profile.full_name ?? '') ||
       email.trim().toLowerCase() !== (profile.email ?? '').toLowerCase() ||
       pendingAvatar !== null ||
-      removeAvatar);
+      removeAvatar ||
+      timezone !== originalBookingPrefsRef.current.timezone ||
+      notificationPhone.trim() !== originalBookingPrefsRef.current.notificationPhone);
 
   const joined = user?.created_at
     ? new Date(user.created_at).toLocaleDateString(undefined, {
@@ -302,6 +360,50 @@ export function ProfileForm() {
                 </span>
               </p>
             )}
+          </div>
+
+          {/* Booking notifications */}
+          <div className="space-y-4 rounded-lg border border-border p-4">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Booking notifications
+            </p>
+            <div className="space-y-2">
+              <Label htmlFor="profile-timezone" className="text-foreground">
+                Your timezone
+              </Label>
+              <select
+                id="profile-timezone"
+                value={timezone}
+                onChange={(e) => setTimezone(e.target.value)}
+                disabled={saving || !bookingPrefsLoaded}
+                className="h-9 w-full rounded-lg border border-border bg-muted px-2.5 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {timezoneOptions.map((tz) => (
+                  <option key={tz} value={tz}>
+                    {tz}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground">
+                Meeting times in booking notifications sent to you are formatted in this timezone.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="profile-notification-phone" className="text-foreground">
+                WhatsApp notification number
+              </Label>
+              <Input
+                id="profile-notification-phone"
+                value={notificationPhone}
+                onChange={(e) => setNotificationPhone(e.target.value)}
+                placeholder="+15551234567"
+                disabled={saving}
+              />
+              <p className="text-xs text-muted-foreground">
+                Where booking confirmations, reminders, and cancellations are sent. Leave blank to
+                opt out of WhatsApp booking notifications.
+              </p>
+            </div>
           </div>
 
           {/* Read-only block */}

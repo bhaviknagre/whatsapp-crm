@@ -15,6 +15,11 @@ import {
   isTemplateWebhookField,
 } from '@/lib/whatsapp/template-webhook'
 import { applyOptOutKeyword } from '@/lib/whatsapp/opt-out'
+import {
+  handleBookingButtonTap,
+  BOOKING_ACK_PAYLOAD,
+  BOOKING_RESCHEDULE_PAYLOAD,
+} from '@/lib/bookings/ack'
 
 // The `after()` callback in POST runs within this route's max duration.
 // Inbound processing can fan out to per-media Meta verification calls, so
@@ -763,6 +768,27 @@ async function processMessage(
   // so the broadcast's `replied_count` advances (via the aggregate
   // trigger installed in migration 003).
   await flagBroadcastReplyIfAny(accountId, contactRecord.id)
+
+  // Booking "Got It" / "Reschedule" taps — a fixed-payload quick-reply
+  // on a booking confirmation/reminder template, or a same-session
+  // interactive send. Resolved to a specific booking and applied
+  // (acknowledged_at set, or an in-session reschedule-link reply)
+  // BEFORE flow/automation dispatch: this is booking-system-owned
+  // semantics, not something a flow/automation author should need to
+  // route around. Does not short-circuit the dispatch below — a
+  // booking tap is still a normal inbound message flows/automations
+  // may also want to react to.
+  if (
+    interactiveReplyId === BOOKING_ACK_PAYLOAD ||
+    interactiveReplyId === BOOKING_RESCHEDULE_PAYLOAD
+  ) {
+    await handleBookingButtonTap(supabaseAdmin(), {
+      accountId,
+      contactId: contactRecord.id,
+      conversationId: conversation.id,
+      action: interactiveReplyId === BOOKING_ACK_PAYLOAD ? 'ack' : 'reschedule',
+    })
+  }
 
   // ============================================================
   // Flow runner dispatch.
