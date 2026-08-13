@@ -30,7 +30,12 @@ export function AccountAccessAlert() {
   const t = useTranslations("AccountAccess");
   const [retrying, setRetrying] = useState(false);
 
-  if (accountStatus === "loading" || accountStatus === "ready") return null;
+  // "suspended" is handled by a full redirect to /suspended
+  // (DashboardShellInner), not this inline banner — see the
+  // AccountStatus doc comment in use-auth.tsx for why.
+  if (accountStatus === "loading" || accountStatus === "ready" || accountStatus === "suspended") {
+    return null;
+  }
 
   const retry = async () => {
     setRetrying(true);

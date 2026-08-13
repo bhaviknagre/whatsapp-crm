@@ -35,7 +35,16 @@ interface Profile {
   beta_features: string[];
   account_id: string | null;
   account_role: AccountRole | null;
+  /** Platform-operator flag (migration 044), orthogonal to account_role. */
+  is_super_admin: boolean;
 }
+
+export type AccountLifecycleStatus =
+  | "pending"
+  | "active"
+  | "suspended"
+  | "cancelled"
+  | "rejected";
 
 interface AccountSummary {
   id: string;
@@ -43,6 +52,8 @@ interface AccountSummary {
   /** Default deal currency (ISO-4217). NOT NULL DEFAULT 'USD' in the
    *  DB (migration 021); narrowed to DEFAULT_CURRENCY when absent. */
   default_currency: string;
+  /** 'active' | 'suspended' | 'cancelled' (migration 044). */
+  status: AccountLifecycleStatus;
 }
 
 /**
@@ -53,6 +64,14 @@ interface AccountSummary {
  * gate returns false without a role, so in both the app silently
  * becomes read-only — the whole UI renders, and nothing saves. That is
  * indistinguishable from a bug unless we say so (issue #471).
+ *
+ * `suspended` is deliberately different from `unlinked`/`error`: those
+ * two leave the (broken) dashboard rendered with an inline banner
+ * (`<AccountAccessAlert />`) since there's still something worth
+ * showing. A suspended account, left rendered, would show a
+ * fully-loaded-looking CRM with zero rows everywhere (RLS silently
+ * denies every read) — indistinguishable from data loss. That state
+ * gets a full redirect instead — see DashboardShellInner.
  */
 export type AccountStatus =
   /** Profile row still in flight. */
@@ -62,7 +81,12 @@ export type AccountStatus =
   /** Signed in, but no profile row / no account / no role on it. */
   | "unlinked"
   /** The profile lookup itself failed after retrying. */
-  | "error";
+  | "error"
+  /** Account status is anything other than 'active' — pending
+   *  (awaiting super-admin approval), suspended (payment issue),
+   *  cancelled, or rejected. See account.status for which one, used
+   *  to branch the /suspended page's copy. */
+  | "suspended";
 
 interface AuthContextValue {
   user: User | null;
@@ -130,6 +154,8 @@ interface AuthContextValue {
   canEditSettings: boolean;
   /** True if the caller can send messages and edit operational data (agent+). */
   canSendMessages: boolean;
+  /** True if this user is a platform super admin (orthogonal to account_role). */
+  isSuperAdmin: boolean;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -152,6 +178,7 @@ interface ProfileRow {
   beta_features: string[] | null;
   account_id: string | null;
   account_role: string | null;
+  is_super_admin: boolean | null;
 }
 
 /**
@@ -192,7 +219,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const result = await supabase
           .from("profiles")
           .select(
-            "id, full_name, email, avatar_url, role, beta_features, account_id, account_role",
+            "id, full_name, email, avatar_url, role, beta_features, account_id, account_role, is_super_admin",
           )
           .eq("user_id", userId)
           .maybeSingle();
@@ -237,9 +264,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (data.account_id) {
           const { data: account, error: accountErr } = await supabase
             .from("accounts")
-            // default_currency added in migration 021; narrowed to the
-            // USD fallback below for older schemas where it reads null.
-            .select("id, name, default_currency")
+            // default_currency added in migration 021; status in 044;
+            // narrowed to safe fallbacks below for older schemas.
+            .select("id, name, default_currency, status")
             .eq("id", data.account_id)
             .maybeSingle();
           if (accountErr) {
@@ -254,6 +281,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               id: account.id,
               name: account.name,
               default_currency: account.default_currency ?? DEFAULT_CURRENCY,
+              status: (account.status as AccountLifecycleStatus | null) ?? "active",
             };
           }
         }
@@ -280,6 +308,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           beta_features: data.beta_features ?? [],
           account_id: data.account_id ?? null,
           account_role: accountRole,
+          is_super_admin: data.is_super_admin ?? false,
         });
         setAccount(accountRow);
         if (!data.account_id || !accountRole) {
@@ -410,8 +439,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       canManageMembers: role ? canManageMembersFor(role) : false,
       canEditSettings: role ? canEditSettingsFor(role) : false,
       canSendMessages: role ? canSendMessagesFor(role) : false,
+      isSuperAdmin: profile?.is_super_admin ?? false,
     };
-  }, [profile?.account_role, profile?.account_id]);
+  }, [profile?.account_role, profile?.account_id, profile?.is_super_admin]);
 
   // Signed out is not a broken account — the shell redirects to /login
   // before anything reads this.
@@ -421,9 +451,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       ? "loading"
       : !profile
         ? "error"
-        : derived.accountId && derived.accountRole
-          ? "ready"
-          : "unlinked";
+        : !derived.accountId || !derived.accountRole
+          ? "unlinked"
+          : account && account.status !== "active"
+            ? "suspended"
+            : "ready";
 
   return (
     <AuthContext.Provider
@@ -481,6 +513,7 @@ export function useAuth(): AuthContextValue {
       canManageMembers: false,
       canEditSettings: false,
       canSendMessages: false,
+      isSuperAdmin: false,
     };
   }
   return ctx;

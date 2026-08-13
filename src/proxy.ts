@@ -1,7 +1,10 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
-export async function middleware(request: NextRequest) {
+// Renamed from middleware.ts — Next.js 16 renamed the Middleware file
+// convention to Proxy (functionality unchanged); the old file name
+// triggers a deprecation warning at build time.
+export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request })
 
   const supabase = createServerClient(
@@ -70,11 +73,43 @@ export async function middleware(request: NextRequest) {
   }
 
   // Protected pages - redirect to login if not authenticated
-  const protectedPaths = ['/dashboard', '/inbox', '/contacts', '/pipelines', '/broadcasts', '/automations', '/settings']
+  const protectedPaths = [
+    '/dashboard', '/inbox', '/contacts', '/pipelines', '/broadcasts',
+    '/automations', '/settings', '/super-admin',
+  ]
   if (!user && protectedPaths.some(path => request.nextUrl.pathname.startsWith(path))) {
     const url = request.nextUrl.clone()
     url.pathname = '/login'
     return withRefreshedCookies(NextResponse.redirect(url))
+  }
+
+  // Super-admin panel gating. Scoped to just this one path prefix —
+  // not a blanket per-request DB check across every dashboard route,
+  // which Next's own Proxy docs advise against ("not intended for
+  // slow data fetching... should not be used as a full session
+  // management or authorization solution"). Reuses the SAME anon-key
+  // session client already constructed above rather than a second
+  // service-role client: profiles' own self-row SELECT policy
+  // (`auth.uid() = user_id OR is_account_member(account_id)`) isn't
+  // gated on account status, so this read works with the user's own
+  // session even if their personal account happens to be suspended.
+  //
+  // This is a UX-layer redirect, not the authorization boundary — the
+  // /api/super-admin/* routes independently re-check is_super_admin
+  // server-side (requireSuperAdmin()) regardless of this gate.
+  if (user && request.nextUrl.pathname.startsWith('/super-admin')) {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('is_super_admin')
+      .eq('user_id', user.id)
+      .maybeSingle()
+
+    if (!profile?.is_super_admin) {
+      const url = request.nextUrl.clone()
+      url.pathname = '/dashboard'
+      url.search = ''
+      return withRefreshedCookies(NextResponse.redirect(url))
+    }
   }
 
   // API routes that need auth (not webhooks)

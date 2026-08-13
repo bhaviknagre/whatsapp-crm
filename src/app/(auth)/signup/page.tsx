@@ -104,6 +104,13 @@ function SignupPageInner() {
               We&apos;ve sent a confirmation link to{" "}
               <span className="text-foreground">{email}</span>. Please check your
               inbox and click the link to verify your account.
+              {!inviteToken && (
+                <>
+                  {" "}
+                  After verifying, an administrator will need to approve your
+                  registration before you can sign in.
+                </>
+              )}
             </CardDescription>
           </CardHeader>
           <CardContent>

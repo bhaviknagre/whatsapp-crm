@@ -13,7 +13,7 @@ import { PresenceHeartbeat } from "@/components/presence/presence-heartbeat";
 // client components can't export Next's metadata object.
 
 function DashboardShellInner({ children }: { children: React.ReactNode }) {
-  const { user, loading } = useAuth();
+  const { user, loading, accountStatus, account } = useAuth();
   const router = useRouter();
 
   // Sidebar drawer state — only used on mobile. On lg+ the sidebar is
@@ -27,7 +27,18 @@ function DashboardShellInner({ children }: { children: React.ReactNode }) {
     }
   }, [user, loading, router]);
 
-  if (loading) {
+  // Suspended/cancelled accounts get a full redirect, not the inline
+  // <AccountAccessAlert /> banner — see the AccountStatus doc comment
+  // in use-auth.tsx for why (RLS would otherwise render a
+  // fully-loaded-looking dashboard with zero rows everywhere, which
+  // reads as data loss rather than suspension).
+  useEffect(() => {
+    if (accountStatus === "suspended") {
+      router.push(`/suspended?status=${account?.status ?? "suspended"}`);
+    }
+  }, [accountStatus, account?.status, router]);
+
+  if (loading || accountStatus === "suspended") {
     return (
       <div className="flex h-screen items-center justify-center bg-background">
         <div className="flex flex-col items-center gap-3">

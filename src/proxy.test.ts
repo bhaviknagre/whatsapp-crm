@@ -7,13 +7,15 @@ import { NextRequest } from "next/server";
 // `refreshedCookies` — cookies Supabase writes via setAll() during getUser(),
 //                      i.e. the freshly *rotated* auth token. The whole point
 //                      of the test is that these must survive onto whatever
-//                      response the middleware returns — including redirects.
+//                      response the proxy returns — including redirects.
+// `mockIsSuperAdmin` — what the /super-admin gate's profiles lookup resolves to.
 let mockUser: { id: string } | null = null;
 let refreshedCookies: Array<{
   name: string;
   value: string;
   options: Record<string, unknown>;
 }> = [];
+let mockIsSuperAdmin = false;
 
 vi.mock("@supabase/ssr", () => ({
   createServerClient: (
@@ -32,17 +34,27 @@ vi.mock("@supabase/ssr", () => ({
         return { data: { user: mockUser } };
       },
     },
+    from: () => ({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: async () => ({
+            data: { is_super_admin: mockIsSuperAdmin },
+          }),
+        }),
+      }),
+    }),
   }),
 }));
 
 // Imported after the mock is registered.
-const { middleware } = await import("./middleware");
+const { proxy } = await import("./proxy");
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://test.supabase.co";
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "anon-key";
   mockUser = null;
   refreshedCookies = [];
+  mockIsSuperAdmin = false;
 });
 
 afterEach(() => vi.clearAllMocks());
@@ -53,12 +65,12 @@ const ROTATED = {
   options: { path: "/", httpOnly: true },
 };
 
-describe("middleware — refreshed auth cookies survive redirects", () => {
+describe("proxy — refreshed auth cookies survive redirects", () => {
   it("carries the rotated token when redirecting a signed-in user off /login", async () => {
     mockUser = { id: "user-1" };
     refreshedCookies = [ROTATED];
 
-    const res = await middleware(
+    const res = await proxy(
       new NextRequest("https://app.test/login"),
     );
 
@@ -77,7 +89,7 @@ describe("middleware — refreshed auth cookies survive redirects", () => {
     // clearing a dead session); those must not be dropped on the redirect.
     refreshedCookies = [{ ...ROTATED, value: "cleared" }];
 
-    const res = await middleware(
+    const res = await proxy(
       new NextRequest("https://app.test/dashboard"),
     );
 
@@ -90,7 +102,7 @@ describe("middleware — refreshed auth cookies survive redirects", () => {
     mockUser = { id: "user-1" };
     refreshedCookies = [ROTATED];
 
-    const res = await middleware(
+    const res = await proxy(
       new NextRequest("https://app.test/login?invite=abc123"),
     );
 
@@ -102,12 +114,48 @@ describe("middleware — refreshed auth cookies survive redirects", () => {
     mockUser = { id: "user-1" };
     refreshedCookies = [ROTATED];
 
-    const res = await middleware(
+    const res = await proxy(
       new NextRequest("https://app.test/dashboard"),
     );
 
     // No redirect — the normal NextResponse.next() already carries cookies.
     expect(res.headers.get("location")).toBeNull();
     expect(res.cookies.get(ROTATED.name)?.value).toBe(ROTATED.value);
+  });
+});
+
+describe("proxy — /super-admin gating", () => {
+  it("redirects an unauthenticated visitor to /login", async () => {
+    mockUser = null;
+
+    const res = await proxy(
+      new NextRequest("https://app.test/super-admin"),
+    );
+
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toContain("/login");
+  });
+
+  it("redirects a signed-in non-super-admin to /dashboard", async () => {
+    mockUser = { id: "user-1" };
+    mockIsSuperAdmin = false;
+
+    const res = await proxy(
+      new NextRequest("https://app.test/super-admin"),
+    );
+
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toContain("/dashboard");
+  });
+
+  it("passes through for a signed-in super admin", async () => {
+    mockUser = { id: "user-1" };
+    mockIsSuperAdmin = true;
+
+    const res = await proxy(
+      new NextRequest("https://app.test/super-admin"),
+    );
+
+    expect(res.headers.get("location")).toBeNull();
   });
 });
